@@ -1,0 +1,65 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function myDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+    function isAdmin() {
+      return isSignedIn() && myDoc().data.role == 'admin';
+    }
+    function isSubAdmin() {
+      return isSignedIn() && myDoc().data.role == 'sub-admin';
+    }
+    function hasPerm(key) {
+      return isAdmin() ||
+        (isSubAdmin() && myDoc().data.permissions[key] == true);
+    }
+    function notBanned() {
+      return isSignedIn() && myDoc().data.isBanned == false;
+    }
+
+    // users/{uid} — a user can read/create their own doc (signup) but can
+    // only ever write role/isApproved/isBanned/permissions as an admin or
+    // permitted sub-admin. Users may update their own non-privileged fields.
+    match /users/{uid} {
+      allow get: if isSignedIn();
+      allow list: if isAdmin() || isSubAdmin();
+      allow create: if isSignedIn() && request.auth.uid == uid
+        && request.resource.data.role == 'user'
+        && request.resource.data.isApproved == false
+        && request.resource.data.isBanned == false;
+      allow update: if isAdmin()
+        || (isSubAdmin() && hasPerm('canBanUsers') && request.resource.data.role == resource.data.role)
+        || (request.auth.uid == uid
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.isApproved == resource.data.isApproved
+            && request.resource.data.isBanned == resource.data.isBanned);
+      allow delete: if isAdmin();
+    }
+
+    // system_settings/config — readable by any signed-in, non-banned user
+    // (the UI needs it to render lock/maintenance overlays); writable only
+    // by admins or sub-admins with canToggleSystemLocks.
+    match /system_settings/{docId} {
+      allow read: if notBanned();
+      allow write: if hasPerm('canToggleSystemLocks');
+    }
+
+    // api_credentials/{serviceId} — sensitive; only manageable by admins or
+    // sub-admins with canManageApis. Not readable by plain users.
+    match /api_credentials/{serviceId} {
+      allow read, write: if hasPerm('canManageApis');
+    }
+
+    // announcements/{id} — readable by any approved, non-banned user;
+    // writable by admins or sub-admins with canPostAnnouncements.
+    match /announcements/{id} {
+      allow read: if notBanned();
+      allow create, update, delete: if hasPerm('canPostAnnouncements');
+    }
+  }
+}
